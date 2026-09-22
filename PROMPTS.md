@@ -165,3 +165,41 @@ Removed an unused `@cloudflare/vitest-pool-workers` dependency after
 deciding the pure-function test strategy didn't need it. Added
 `.github/workflows/ci.yml` (typecheck, test, `wrangler deploy --dry-run`),
 `README.md`, and `LICENSE`.
+
+### 7. Concurrency review: duplicate rollout starts
+
+> so mnow lest says twi messes a bot two times it upadetd thdidi it word ,
+> mwntion dudiing this work i also had achat witht he bot so ti will essety
+> creste a new work flow
+
+User asked two related questions: whether workflow steps are safely
+sequenced, and whether chatting with the bot while a rollout is running
+could spawn a second workflow.
+
+**Chat cannot spawn a workflow** — `POST /api/chat/:promptId` never touches
+`env.ROLLOUT`, so this half was unfounded, and Durable Objects process one
+request at a time per instance (an input gate serializes concurrent calls),
+so `pickVersion()` calls from chat can't interleave mid-write with the
+Workflow's `setRouting()` calls either.
+
+**But two concurrent `POST /rollouts` calls for the same prompt was a real
+bug.** The guard read `routing.rolloutId` via `stub.getRouting()` in the
+Worker route handler, then checked it — but that field is only *set* inside
+the Workflow's first `step.do`, which runs asynchronously and is not
+guaranteed to have executed by the time a second concurrent request performs
+its own `getRouting()`. Classic check-then-act TOCTOU race, split across an
+`await` in code that isn't serialized by anything.
+
+Fixed by moving the check-and-set into a single Durable Object call,
+`PromptDO.reserveRollout()` (`src/do/prompt-do.ts`), so the DO's
+single-threaded request processing does the serializing instead of relying
+on the Worker to get the timing right. Added `releaseRollout()` for the
+failure path — without it, a rollout that failed to start (e.g.
+`env.ROLLOUT.create()` throwing) would leave the reservation stuck forever,
+permanently blocking that prompt from ever rolling out again.
+
+Verified live, not just by reasoning about it: fired 10 concurrent
+`POST /rollouts` requests for the same prompt+candidate against a running
+dev server. Exactly 1 of 10 succeeded; the other 9 got
+`"a rollout is already running for this prompt"`. Confirmed via direct D1
+query that exactly one `rollouts` row exists, not ten.

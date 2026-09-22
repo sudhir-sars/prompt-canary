@@ -71,6 +71,35 @@ export class PromptDO extends DurableObject<Env> {
 		return row ? (JSON.parse(row.state) as RoutingState) : null;
 	}
 
+	// Atomically claim the right to start a rollout, or refuse if one is
+	// already running. This MUST be a single DO call rather than
+	// "getRouting() then check in the Worker" — Durable Objects process one
+	// request at a time (the input gate serializes concurrent calls to the
+	// same instance), so doing the check-and-set here closes the race that a
+	// check-then-act split across an await in the Worker cannot. Sets
+	// rolloutId immediately (before the Workflow's first phase step even
+	// runs) precisely so a second concurrent call sees it right away.
+	async reserveRollout(rolloutId: string): Promise<{ ok: boolean; routing: RoutingState | null }> {
+		const state = await this.getRouting();
+		if (!state) return { ok: false, routing: null };
+		if (state.rolloutId) return { ok: false, routing: state };
+
+		const reserved: RoutingState = { ...state, rolloutId };
+		await this.setRouting(reserved);
+		return { ok: true, routing: state }; // return the PRE-reservation state so the caller has the real baseline config
+	}
+
+	// Release a reservation if the Workflow never actually got created
+	// (e.g. env.ROLLOUT.create() throws after reserveRollout succeeded).
+	// Without this, a failed rollout start would leave the prompt
+	// permanently unable to start another rollout.
+	async releaseRollout(rolloutId: string): Promise<void> {
+		const state = await this.getRouting();
+		if (state && state.rolloutId === rolloutId) {
+			await this.setRouting({ ...state, rolloutId: null });
+		}
+	}
+
 	// Weighted-random variant pick. (promptX used a sticky SHA-256 bucket by
 	// session; this demo favors always-fresh sampling so the canary's traffic
 	// share is visible turn-by-turn in the UI. Both are legitimate choices —
