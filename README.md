@@ -149,7 +149,8 @@ history that led to it.
 
 ```bash
 npm install
-npx wrangler d1 migrations apply prompt-canary --local   # or --remote
+npm run cf-typegen                                        # generates worker-configuration.d.ts (gitignored)
+npx wrangler d1 migrations apply prompt-canary --local    # or --remote
 npm run dev       # http://localhost:8787
 ```
 
