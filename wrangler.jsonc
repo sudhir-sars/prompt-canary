@@ -1,0 +1,69 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "prompt-canary",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-22",
+	"compatibility_flags": ["nodejs_compat"],
+
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+
+	// Chat playground + control-plane UI. Served from the same Worker so a
+	// single `wrangler deploy` ships both the API and the front end.
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application"
+	},
+
+	// Llama 3.3 serves two distinct roles: generating chat replies, and acting
+	// as the judge that scores those replies. See src/lib/ai.ts.
+	"ai": {
+		"binding": "AI"
+	},
+
+	// Immutable audit surface: prompt versions and every eval event ever
+	// recorded. Nothing in here is updated in place.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "prompt-canary",
+			"database_id": "70f2316b-b9dd-457e-a835-d1654694ea1a"
+		}
+	],
+
+	// One instance per prompt. Holds the live routing config and the rolling
+	// eval window, and is the strongly-consistent arbiter for rollback.
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "PROMPT",
+				"class_name": "PromptDO"
+			}
+		]
+	},
+
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["PromptDO"]
+		}
+	],
+
+	// Durable multi-step rollout: 5% -> 25% -> 50% -> 100% with a bake and an
+	// SLO gate between each phase. Survives restarts; sleeps do not burn CPU.
+	"workflows": [
+		{
+			"name": "prompt-canary-rollout",
+			"binding": "ROLLOUT",
+			"class_name": "RolloutWorkflow"
+		}
+	],
+
+	"vars": {
+		"JUDGE_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+		"CHAT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+	}
+}

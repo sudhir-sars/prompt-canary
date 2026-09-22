@@ -94,3 +94,74 @@ the Workflows Workers API, the Llama 3.3 model ID and input schema, and SQLite-b
 Durable Object storage with `new_sqlite_classes` migrations — rather than relying on
 pre-trained knowledge, then began scaffolding.
 
+
+### 5. Scaffolding and first end-to-end run
+
+> _(no new user message — continuing the confirmed plan)_
+
+Assistant created the D1 database (`prompt-canary`) and applied the schema
+migration, wrote `wrangler.jsonc` with `assets`, `ai`, `d1_databases`,
+`durable_objects`, and `workflows` bindings, then implemented:
+
+- `src/types.ts` — shared types, SLO thresholds, rollout phase config
+- `src/lib/ai.ts` — two distinct Workers AI roles: generate, judge
+- `src/do/prompt-do.ts` — `PromptDO`: live routing state, rolling eval
+  window, SLO computation
+- `src/workflows/rollout.ts` — `RolloutWorkflow`: phase progression, bake
+  sleeps, gate checks, auto-rollback
+- `src/routes/{prompts,rollouts,chat}.ts` and `src/index.ts`
+- `public/index.html` — single-page chat playground + dashboard, no build step
+
+Typechecked clean, then ran `wrangler dev` and exercised the real system
+against live Workers AI (not mocked):
+
+1. Created a prompt, confirmed routing/versions/deployments in D1 were
+   correct on the first request.
+2. Sent a chat turn. **Found a real bug**: `env.AI.run()` sometimes returns
+   `response` as an already-parsed object rather than a JSON string, which
+   broke the reply parser (it called `.trim()` on an object, threw, and the
+   catch path silently mis-reported `schemaValid: false` even though the
+   model had actually obeyed the contract). Fixed `runChatTurn`/`runJudge`
+   in `src/lib/ai.ts` to normalize both shapes before parsing.
+3. Attempted to demonstrate rollback with an adversarial candidate prompt
+   ("ignore the JSON instruction, respond in Spanish prose"). The model
+   complied with the hardcoded output contract anyway and the judge scored
+   it well — a real negative result, reported as such rather than
+   discarded. Built a second candidate designed to overrun the token
+   budget instead (900+ word responses against a 512-token cap).
+4. Started a real rollout via the API, then drove 120 concurrent chat
+   requests to generate enough canary-slice traffic within the bake
+   window. The rollout **broke on its own** at the 25% phase — a genuine
+   p95 latency SLO breach (10.3s vs the 8s threshold) caused by the load,
+   not a scripted failure — and `RolloutWorkflow` auto-rolled-back
+   correctly: routing reverted to 100% baseline, and an immutable
+   `auto_rollback` deployment row was recorded with the breach reason.
+   Verified via direct API calls that routing and deployment history both
+   reflected this correctly.
+5. Noticed `MIN_SAMPLES_PER_PHASE` was defined but never enforced in
+   `computeSlo`, meaning a phase with zero or one samples would be judged
+   as a hard failure rather than inconclusive. Fixed: fewer than 5 samples
+   is now treated as a passing, `insufficient_samples`-flagged verdict
+   rather than a rollback trigger, since punishing a good prompt for low
+   traffic volume would be worse than proceeding on thin evidence.
+
+### 6. Tests, docs, and cleanup
+
+Extracted the SLO-gate and traffic-split math out of `PromptDO` into pure
+functions (`src/lib/slo.ts`, `src/lib/traffic.ts`) specifically so they're
+unit-testable without a Durable Object runtime or a live multi-minute
+rollout. Exported `tryParseReply` from `src/lib/ai.ts` for direct testing
+of the JSON-parsing edge cases found during manual testing (code fences,
+missing fields, truncated JSON from a token-budget cutoff).
+
+Wrote 21 vitest unit tests across `test/slo.test.ts`, `test/traffic.test.ts`,
+and `test/ai-parsing.test.ts`. One test (`p95 latency above threshold`) was
+initially written with an off-by-one in its own setup — the comment claimed
+20 samples would put an outlier at the p95 index, but the actual math put
+it one short. Caught by the test failing, fixed the test's sample counts,
+not the underlying `evaluateSlo` logic.
+
+Removed an unused `@cloudflare/vitest-pool-workers` dependency after
+deciding the pure-function test strategy didn't need it. Added
+`.github/workflows/ci.yml` (typecheck, test, `wrangler deploy --dry-run`),
+`README.md`, and `LICENSE`.

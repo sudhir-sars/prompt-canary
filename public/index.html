@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>prompt-canary</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; padding: 24px; max-width: 1100px; margin-inline: auto;
+    background: #0b0d12; color: #e6e8ee;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: #8b93a7; font-size: 0.85rem; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: #131722; border: 1px solid #23283a; border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em;
+    color: #8b93a7; margin: 0 0 12px; }
+  select, input, textarea, button {
+    width: 100%; background: #0b0d12; color: #e6e8ee; border: 1px solid #2c3247;
+    border-radius: 6px; padding: 8px 10px; font-size: 0.9rem; font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 70px; }
+  label { font-size: 0.78rem; color: #8b93a7; display: block; margin: 10px 0 4px; }
+  button {
+    background: #3457f0; border-color: #3457f0; color: white; cursor: pointer;
+    font-weight: 600; margin-top: 12px;
+  }
+  button.secondary { background: transparent; color: #3457f0; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  #chatLog { display: flex; flex-direction: column; gap: 10px; max-height: 420px;
+    overflow-y: auto; margin-bottom: 12px; }
+  .msg { padding: 10px 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.4; }
+  .msg.user { background: #1c2436; align-self: flex-end; max-width: 80%; }
+  .msg.bot { background: #182018; align-self: flex-start; max-width: 85%; }
+  .msg .meta { font-size: 0.72rem; color: #8b93a7; margin-top: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: 0.72rem; font-weight: 600; }
+  .badge.ok { background: #123420; color: #4ade80; }
+  .badge.bad { background: #3a1414; color: #f87171; }
+  .badge.neutral { background: #1c2436; color: #8ea0d4; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #1c2233; }
+  th { color: #8b93a7; font-weight: 500; }
+  .pill { padding: 1px 8px; border-radius: 20px; font-size: 0.72rem; font-weight: 600; }
+  .pill.running { background: #1c2436; color: #8ea0d4; }
+  .pill.promoted { background: #123420; color: #4ade80; }
+  .pill.rolled_back { background: #3a1414; color: #f87171; }
+  .phase-track { display: flex; gap: 4px; margin: 8px 0; }
+  .phase-track div { flex: 1; height: 6px; border-radius: 3px; background: #1c2233; }
+  .phase-track div.active { background: #3457f0; }
+  .phase-track div.passed { background: #22c55e; }
+  .phase-track div.failed { background: #ef4444; }
+  .muted { color: #8b93a7; font-size: 0.78rem; }
+  code { background: #1c2233; padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
+</style>
+</head>
+<body>
+  <h1>prompt-canary</h1>
+  <div class="sub">SLO-gated canary rollouts for LLM prompts, with automatic rollback. Chat traffic is the canary's test traffic.</div>
+
+  <div class="card">
+    <h2>Prompt</h2>
+    <div class="row">
+      <select id="promptSelect"></select>
+      <button class="secondary" id="newPromptBtn" style="margin-top:0">+ New prompt</button>
+    </div>
+    <div id="routingInfo" class="muted" style="margin-top:10px"></div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Chat playground</h2>
+        <div id="chatLog"></div>
+        <div class="row">
+          <input id="chatInput" placeholder="Say something to the active prompt..." />
+          <button id="sendBtn" style="width:auto; padding-inline:16px">Send</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>New version</h2>
+        <textarea id="newVersionContent" placeholder="System prompt content for the new version..."></textarea>
+        <label>Note (optional)</label>
+        <input id="newVersionNote" placeholder="e.g. friendlier tone" />
+        <div class="row">
+          <button class="secondary" id="deployNowBtn">Deploy at 100% (skip canary)</button>
+          <button id="startRolloutBtn">Save + start canary rollout</button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>Active rollout</h2>
+        <div id="rolloutPanel" class="muted">No rollout running.</div>
+      </div>
+
+      <div class="card">
+        <h2>Versions</h2>
+        <table id="versionsTable"><thead><tr><th>seq</th><th>note</th><th>created</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <div class="card">
+        <h2>Deployment history</h2>
+        <table id="deploymentsTable"><thead><tr><th>reason</th><th>config</th><th>when</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = { promptId: null, sessionId: null, versions: [], pollTimer: null };
+
+async function api(path, opts) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+async function loadPrompts() {
+  const { prompts } = await api("/api/prompts");
+  const sel = $("promptSelect");
+  sel.innerHTML = "";
+  for (const p of prompts) {
+    const opt = document.createElement("option");
+    opt.value = p.id; opt.textContent = p.name + " (" + p.id + ")";
+    sel.appendChild(opt);
+  }
+  if (prompts.length && !state.promptId) state.promptId = prompts[0].id;
+  if (state.promptId) sel.value = state.promptId;
+  return prompts;
+}
+
+async function loadPromptDetail() {
+  if (!state.promptId) return;
+  const data = await api("/api/prompts/" + state.promptId);
+  state.versions = data.versions;
+
+  const routing = data.routing;
+  $("routingInfo").innerHTML = routing
+    ? "Live traffic: " + routing.config.map(function (e) { return "<code>v" + verSeq(e.versionId) + " to " + e.traffic + "%</code>"; }).join(" ")
+    : "No active deployment.";
+
+  const vBody = $("versionsTable").querySelector("tbody");
+  vBody.innerHTML = data.versions.map(function (v) {
+    return "<tr><td>v" + v.sequence + "</td><td>" + escapeHtml(v.note || "-") + "</td><td>" + new Date(v.createdAt).toLocaleTimeString() + "</td></tr>";
+  }).join("");
+
+  const dBody = $("deploymentsTable").querySelector("tbody");
+  dBody.innerHTML = data.deployments.map(function (d) {
+    return "<tr><td>" + d.reason + "</td><td>" + d.config.map(function (e) { return "v" + verSeq(e.versionId) + ":" + e.traffic + "%"; }).join(", ") + "</td><td>" + new Date(d.createdAt).toLocaleTimeString() + "</td></tr>";
+  }).join("");
+
+  await loadRollouts();
+}
+
+function verSeq(versionId) {
+  const v = state.versions.find(function (v) { return v.id === versionId; });
+  return v ? v.sequence : versionId.slice(0, 8);
+}
+
+async function loadRollouts() {
+  const { rollouts } = await api("/api/prompts/" + state.promptId + "/rollouts");
+  const panel = $("rolloutPanel");
+  const running = rollouts.find(function (r) { return r.status === "running"; });
+
+  if (rollouts.length === 0) { panel.innerHTML = "No rollout has run yet."; stopPolling(); return; }
+
+  const r = running || rollouts[0];
+  const phases = [5, 25, 50, 100];
+  const track = phases.map(function (p, i) {
+    let cls = "";
+    if (r.status === "running") cls = i < r.phase ? "passed" : i === r.phase ? "active" : "";
+    else if (r.status === "promoted") cls = "passed";
+    else if (r.status === "rolled_back") cls = i < r.phase ? "passed" : i === r.phase ? "failed" : "";
+    return "<div class=\"" + cls + "\" title=\"" + p + "%\"></div>";
+  }).join("");
+
+  panel.innerHTML =
+    "<div><span class=\"pill " + r.status + "\">" + r.status + "</span> candidate v" + verSeq(r.candidateVersionId) +
+    " vs baseline v" + verSeq(r.baselineVersionId) + "</div>" +
+    "<div class=\"phase-track\">" + track + "</div>" +
+    "<div class=\"muted\">" + (r.outcomeReason ? escapeHtml(r.outcomeReason) : "phase " + (r.phase + 1) + " of " + phases.length + " (" + phases[r.phase] + "% traffic)") + "</div>";
+
+  if (r.status === "running") startPolling(); else stopPolling();
+}
+
+function startPolling() {
+  if (state.pollTimer) return;
+  state.pollTimer = setInterval(loadPromptDetail, 4000);
+}
+function stopPolling() {
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+function appendMsg(role, text, meta) {
+  const log = $("chatLog");
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.innerHTML = escapeHtml(text) + (meta ? "<div class=\"meta\">" + meta + "</div>" : "");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+$("promptSelect").addEventListener("change", function (e) {
+  state.promptId = e.target.value;
+  state.sessionId = null;
+  $("chatLog").innerHTML = "";
+  loadPromptDetail();
+});
+
+$("newPromptBtn").addEventListener("click", async function () {
+  const name = prompt("Prompt name:");
+  if (!name) return;
+  const content = prompt("Initial system prompt content:");
+  if (!content) return;
+  const created = await api("/api/prompts", { method: "POST", body: JSON.stringify({ name: name, content: content }) });
+  await loadPrompts();
+  state.promptId = created.promptId;
+  $("promptSelect").value = created.promptId;
+  await loadPromptDetail();
+});
+
+$("sendBtn").addEventListener("click", sendChat);
+$("chatInput").addEventListener("keydown", function (e) { if (e.key === "Enter") sendChat(); });
+
+async function sendChat() {
+  const input = $("chatInput");
+  const text = input.value.trim();
+  if (!text || !state.promptId) return;
+  input.value = "";
+  appendMsg("user", text);
+  $("sendBtn").disabled = true;
+  try {
+    const res = await api("/api/chat/" + state.promptId, {
+      method: "POST",
+      body: JSON.stringify({ message: text, sessionId: state.sessionId }),
+    });
+    state.sessionId = res.sessionId;
+    const ev = res.eval;
+    const badges = [
+      "<span class=\"badge " + (ev.ok ? "ok" : "bad") + "\">" + (ev.ok ? "ok" : "error") + "</span>",
+      "<span class=\"badge " + (ev.schemaValid ? "ok" : "bad") + "\">" + (ev.schemaValid ? "schema ok" : "schema bad") + "</span>",
+      "<span class=\"badge neutral\">" + ev.latencyMs + "ms</span>",
+      ev.compositeScore != null ? "<span class=\"badge neutral\">score " + ev.compositeScore.toFixed(2) + "</span>" : "",
+      "<span class=\"badge neutral\">v" + verSeq(res.versionId) + "</span>",
+    ].join(" ");
+    appendMsg("bot", res.reply, badges);
+  } catch (err) {
+    appendMsg("bot", "Error: " + err.message);
+  } finally {
+    $("sendBtn").disabled = false;
+    loadPromptDetail();
+  }
+}
+
+$("deployNowBtn").addEventListener("click", async function () {
+  const content = $("newVersionContent").value.trim();
+  if (!content || !state.promptId) return;
+  const note = $("newVersionNote").value.trim() || undefined;
+  const created = await api("/api/prompts/" + state.promptId + "/versions", { method: "POST", body: JSON.stringify({ content: content, note: note }) });
+  await api("/api/prompts/" + state.promptId + "/deploy", { method: "POST", body: JSON.stringify({ versionId: created.versionId }) });
+  $("newVersionContent").value = ""; $("newVersionNote").value = "";
+  await loadPromptDetail();
+});
+
+$("startRolloutBtn").addEventListener("click", async function () {
+  const content = $("newVersionContent").value.trim();
+  if (!content || !state.promptId) return;
+  const note = $("newVersionNote").value.trim() || undefined;
+  const created = await api("/api/prompts/" + state.promptId + "/versions", { method: "POST", body: JSON.stringify({ content: content, note: note }) });
+  await api("/api/prompts/" + state.promptId + "/rollouts", { method: "POST", body: JSON.stringify({ candidateVersionId: created.versionId }) });
+  $("newVersionContent").value = ""; $("newVersionNote").value = "";
+  await loadPromptDetail();
+});
+
+(async function () {
+  const prompts = await loadPrompts();
+  if (prompts.length) await loadPromptDetail();
+})();
+</script>
+</body>
+</html>
